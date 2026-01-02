@@ -1,0 +1,36 @@
+{
+  "id": 1763461633843,
+  "name": "hammad",
+  "factoryName": "saqib",
+  "twist": "1234",
+  "loaderName": "hammad",
+  "loaderNumber": "123",
+  "date": "18-11-2025",
+  "time": "3.27 pm",
+  "scannedList": [
+    {
+      "id": 1762429857788,
+      "boxNumber": "20",
+      "cones": "92",
+      "grossWeight": "21.940",
+      "netWeight": "19.940",
+      "addedAt": 1762429857788
+    },
+    {
+      "id": 1762429862402,
+      "boxNumber": "31",
+      "cones": "92",
+      "grossWeight": "10.020",
+      "netWeight": "8.020",
+      "addedAt": 1762429862402
+    }
+  ],
+  "totals": {
+    "totalNW": "27.960",
+    "totalGW": "31.960",
+    "totalCones": "184",
+    "totalLbs": "61.512"
+  },
+  "boxCount": 2,
+  "timestamp": 1763461633843
+}

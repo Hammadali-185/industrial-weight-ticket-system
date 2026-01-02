@@ -1,0 +1,31 @@
+appId: com.saqibsilk.weight-dashboard
+productName: Saqib Silk Weight Dashboard
+copyright: Copyright © 2024 Saqib Silk Industry
+
+directories:
+  output: dist-electron
+  buildResources: build
+
+files:
+  - dist/**/*
+  - main.cjs
+  - preload.cjs
+  - package.json
+
+win:
+  target:
+    - target: portable
+      arch:
+        - x64
+  icon: public/icon.ico
+  artifactName: ${productName}-${version}-portable.${ext}
+
+portable:
+  artifactName: ${productName}-${version}-portable.${ext}
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+
