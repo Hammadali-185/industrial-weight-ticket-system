@@ -53,6 +53,6 @@ coverage/
 *.temp
 .cache/
 
-# Weight data (optional - uncomment if you don't want to track data)
-# weightdata/
+# Weight data (contains business data - should not be committed)
+weight-dashboard/weightdata/
 

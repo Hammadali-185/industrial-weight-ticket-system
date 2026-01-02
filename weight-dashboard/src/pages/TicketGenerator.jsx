@@ -234,7 +234,7 @@ Lot No: ${formData.lotNo}`
             <div class="ticket">
               <div class="header">
                 <h1>SAQIB SILK INDUSTRY</h1>
-                <p>0324-4859051, 0316-2089194</p>
+                <p>Contact: [Your Phone Number]</p>
               </div>
               <div class="body">
                 <div class="content">
@@ -340,7 +340,7 @@ Lot No: ${formData.lotNo}`
             <div class="ticket">
               <div class="header">
                 <h1>SAQIB SILK INDUSTRY</h1>
-                <p>0324-4859051, 0316-2089194</p>
+                <p>Contact: [Your Phone Number]</p>
               </div>
               <div class="body">
                 <div class="content">
@@ -628,7 +628,7 @@ Lot No: ${formData.lotNo}`
                   {/* Header */}
                   <div className="bg-yellow-400 p-4 text-center border-b-2 border-black">
                     <h3 className="text-lg font-bold text-black">SAQIB SILK INDUSTRY</h3>
-                    <p className="text-sm text-black">0324-4859051, 0316-2089194</p>
+                    <p className="text-sm text-black">Contact: [Your Phone Number]</p>
                   </div>
                   
                   {/* Body */}

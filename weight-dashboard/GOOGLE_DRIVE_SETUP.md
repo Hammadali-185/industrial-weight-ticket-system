@@ -43,7 +43,7 @@ This will install `googleapis` package needed for Google Drive integration.
 3. You'll see a **"Google Drive: Not Connected"** status box
 4. Click **"🔗 Connect to Google Drive"** button
 5. A browser window will open
-6. Sign in with: `saqib.arshad.silk@gmail.com`
+6. Sign in with your Google account
 7. Click **"Allow"** to grant access
 8. You'll see an **authorization code** on the page
 9. Copy that code

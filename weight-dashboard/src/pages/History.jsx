@@ -562,7 +562,7 @@ const History = () => {
                   <p className="mb-2">A browser window has opened for Google sign-in.</p>
                   <p className="mb-2"><strong>Steps:</strong></p>
                   <ol className="list-decimal list-inside space-y-1 text-sm">
-                    <li>Sign in with your Google account (saqib.arshad.silk@gmail.com)</li>
+                    <li>Sign in with your Google account</li>
                     <li>Click "Allow" to grant access</li>
                     <li>You will see an authorization code on the page</li>
                     <li>Copy that code and paste it below:</li>
