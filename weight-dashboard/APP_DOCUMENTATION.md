@@ -69,7 +69,7 @@
   - Total Net Weight
   - Total Gross Weight
   - Total Cones
-  - Total Pounds (NW × 2.20)
+  - Total Pounds (NW × 2.2046)
 - **Print functionality** - formatted list with all boxes
 - **Smart history merging**:
   - Same name + same twist → merges into one list

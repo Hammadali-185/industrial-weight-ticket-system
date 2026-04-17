@@ -206,6 +206,125 @@ ipcMain.handle('request-reconnect', async () => {
   return { success: true }
 })
 
+// Print ticket HTML (silent by default) using a hidden BrowserWindow.
+// This avoids window.open + OS print dialog in the renderer.
+ipcMain.handle('print-ticket-html', async (_evt, payload) => {
+  const html = payload && typeof payload.html === 'string' ? payload.html : ''
+  const silent = payload && payload.silent === false ? false : true
+
+  if (!html) {
+    return { success: false, error: 'Missing html' }
+  }
+
+  let printWin = null
+  try {
+    printWin = new BrowserWindow({
+      show: false,
+      width: 420,
+      height: 640,
+      parent: mainWindow || undefined,
+      modal: false,
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true,
+        sandbox: true,
+      },
+    })
+
+    // Load via data: URL (ticket HTML is small). If this ever fails due to size,
+    // switch to a temp file approach under app.getPath('temp').
+    await printWin.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
+
+    const result = await new Promise((resolve) => {
+      // Slight delay helps ensure fonts/images are ready in some drivers.
+      setTimeout(() => {
+        try {
+          printWin.webContents.print(
+            {
+              silent,
+              printBackground: true,
+            },
+            (success, failureReason) => {
+              if (!success) {
+                resolve({ success: false, error: failureReason || 'Print failed' })
+              } else {
+                resolve({ success: true })
+              }
+            }
+          )
+        } catch (e) {
+          resolve({ success: false, error: e && e.message ? e.message : String(e) })
+        }
+      }, 150)
+    })
+
+    return result
+  } catch (error) {
+    return { success: false, error: error && error.message ? error.message : String(error) }
+  } finally {
+    try {
+      if (printWin && !printWin.isDestroyed()) {
+        printWin.close()
+      }
+    } catch (_) {
+      // ignore
+    }
+  }
+})
+
+// Generic silent HTML printing (re-used by Generate List, etc.)
+ipcMain.handle('print-html', async (_evt, payload) => {
+  const html = payload && typeof payload.html === 'string' ? payload.html : ''
+  const silent = payload && payload.silent === false ? false : true
+  if (!html) return { success: false, error: 'Missing html' }
+
+  let printWin = null
+  try {
+    printWin = new BrowserWindow({
+      show: false,
+      width: 900,
+      height: 900,
+      parent: mainWindow || undefined,
+      modal: false,
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true,
+        sandbox: true,
+      },
+    })
+
+    await printWin.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
+
+    const result = await new Promise((resolve) => {
+      setTimeout(() => {
+        try {
+          printWin.webContents.print(
+            {
+              silent,
+              printBackground: true,
+            },
+            (success, failureReason) => {
+              resolve(success ? { success: true } : { success: false, error: failureReason || 'Print failed' })
+            }
+          )
+        } catch (e) {
+          resolve({ success: false, error: e && e.message ? e.message : String(e) })
+        }
+      }, 150)
+    })
+
+    return result
+  } catch (error) {
+    return { success: false, error: error && error.message ? error.message : String(error) }
+  } finally {
+    try {
+      if (printWin && !printWin.isDestroyed()) printWin.close()
+    } catch (_) {
+      // ignore
+    }
+  }
+})
+
 // Read history from file (handles both JSON lines and JSON array)
 ipcMain.handle('read-history', () => {
   const fs = require('fs-extra')
@@ -469,6 +588,49 @@ ipcMain.handle('save-payments', (_, data) => {
   }
 })
 
+// ===== INVENTORY STORAGE (in/out transactions) =====
+
+ipcMain.handle('read-inventory', () => {
+  const fs = require('fs-extra')
+  const dataDir = getDataDir()
+  const INVENTORY_FILE = path.join(dataDir, 'inventory.json')
+
+  try {
+    if (!fs.existsSync(INVENTORY_FILE)) {
+      return []
+    }
+
+    const data = fs.readFileSync(INVENTORY_FILE, 'utf8').trim()
+    if (!data) return []
+
+    const parsed = JSON.parse(data)
+    return Array.isArray(parsed) ? parsed : []
+  } catch (error) {
+    console.error('[Storage] Error reading inventory:', error)
+    return []
+  }
+})
+
+ipcMain.handle('save-inventory', (_, data) => {
+  const fs = require('fs-extra')
+  const dataDir = getDataDir()
+  const INVENTORY_FILE = path.join(dataDir, 'inventory.json')
+
+  try {
+    if (!Array.isArray(data)) {
+      console.error('[Storage] save-inventory: data is not an array:', typeof data)
+      return false
+    }
+
+    fs.writeFileSync(INVENTORY_FILE, JSON.stringify(data, null, 2), 'utf8')
+    console.log(`[Storage] Saved ${data.length} inventory txn(s) to ${INVENTORY_FILE}`)
+    return true
+  } catch (error) {
+    console.error('[Storage] Error saving inventory:', error)
+    return false
+  }
+})
+
 // Save individual list to listings folder
 ipcMain.handle('save-list-file', (_, listData) => {
   const fs = require('fs-extra')
@@ -640,6 +802,75 @@ ipcMain.handle('google-drive-get-auth-url', () => {
     console.error('[GoogleDrive] Error getting auth URL:', error)
     console.error('[GoogleDrive] Error stack:', error.stack)
     return { success: false, error: error.message || 'Unknown error' }
+  }
+})
+
+// Modern desktop auth: loopback redirect (no copy/paste code)
+ipcMain.handle('google-drive-connect', async () => {
+  const http = require('http')
+  const { shell } = require('electron')
+
+  let server = null
+  try {
+    const codePromise = new Promise((resolve, reject) => {
+      server = http.createServer((req, res) => {
+        try {
+          const url = new URL(req.url, 'http://127.0.0.1')
+          if (url.pathname !== '/oauth2callback') {
+            res.writeHead(404, { 'Content-Type': 'text/plain' })
+            res.end('Not found')
+            return
+          }
+          const code = url.searchParams.get('code')
+          const error = url.searchParams.get('error')
+          if (error) {
+            res.writeHead(200, { 'Content-Type': 'text/html' })
+            res.end('<h2>Google authorization failed.</h2><p>You can close this window.</p>')
+            reject(new Error(error))
+            return
+          }
+          if (!code) {
+            res.writeHead(200, { 'Content-Type': 'text/html' })
+            res.end('<h2>Missing authorization code.</h2><p>You can close this window.</p>')
+            reject(new Error('Missing code'))
+            return
+          }
+          res.writeHead(200, { 'Content-Type': 'text/html' })
+          res.end('<h2>Google Drive connected.</h2><p>You can close this window and return to the app.</p>')
+          resolve(code)
+        } catch (e) {
+          reject(e)
+        }
+      })
+
+      server.listen(0, '127.0.0.1')
+    })
+
+    const port = await new Promise((resolve, reject) => {
+      server.on('listening', () => resolve(server.address().port))
+      server.on('error', reject)
+    })
+
+    const redirectUri = `http://127.0.0.1:${port}/oauth2callback`
+    const authUrl = googleDriveService.getAuthUrl({ redirectUri })
+    shell.openExternal(authUrl)
+
+    const timeoutMs = 2 * 60 * 1000
+    const code = await Promise.race([
+      codePromise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Authorization timeout')), timeoutMs)),
+    ])
+
+    const tokens = await googleDriveService.getTokensFromCode(code, { redirectUri })
+    return { success: true, tokens }
+  } catch (error) {
+    return { success: false, error: error && error.message ? error.message : String(error) }
+  } finally {
+    try {
+      if (server) server.close()
+    } catch (_) {
+      // ignore
+    }
   }
 })
 

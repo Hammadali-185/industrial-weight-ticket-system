@@ -71,75 +71,200 @@ const loadHistoryFileSystem = async () => {
   }
 }
 
+// ===== BROWSER HISTORY (Chrome / Edge — Web Serial workflow) =====
+export const WEB_HISTORY_STORAGE_KEY = 'weight_dashboard_history'
+const LEGACY_WEB_HISTORY_KEY = 'generate_list_history'
 
-// ===== UNIFIED API (Uses nativeAPI for Electron) =====
+const loadHistoryWeb = () => {
+  if (typeof localStorage === 'undefined') return []
+  try {
+    let raw = localStorage.getItem(WEB_HISTORY_STORAGE_KEY)
+    if (raw === null) {
+      const legacy = localStorage.getItem(LEGACY_WEB_HISTORY_KEY)
+      if (legacy) {
+        localStorage.setItem(WEB_HISTORY_STORAGE_KEY, legacy)
+        localStorage.removeItem(LEGACY_WEB_HISTORY_KEY)
+        raw = legacy
+      }
+    }
+    if (raw === null) return []
+    const data = JSON.parse(raw)
+    return Array.isArray(data) ? data : []
+  } catch (e) {
+    console.warn('[Storage] loadHistoryWeb parse error:', e)
+    return []
+  }
+}
 
-// Save history (uses file system via nativeAPI)
+const saveHistoryWeb = (historyArray) => {
+  if (typeof localStorage === 'undefined') return false
+  try {
+    localStorage.setItem(WEB_HISTORY_STORAGE_KEY, JSON.stringify(historyArray))
+    return true
+  } catch (e) {
+    console.error('[Storage] saveHistoryWeb failed:', e)
+    return false
+  }
+}
+
+/** Set when history was ever saved from this app (browser localStorage or Electron file). Skips empty-state Google Drive auto-restore after intentional deletes. */
+const HISTORY_PERSISTED_MARKER_KEY = 'weight_dashboard_history_persisted'
+
+const markHistoryPersistedOnDevice = () => {
+  if (typeof localStorage === 'undefined') return
+  try {
+    localStorage.setItem(HISTORY_PERSISTED_MARKER_KEY, '1')
+  } catch (_) {
+    // ignore quota / private mode
+  }
+}
+
+/**
+ * `true` once history has ever been written here (including cleared to []), or Electron has loaded a non-empty file.
+ * Used so empty local/file storage does not re-pull Google Drive after the user deleted everything.
+ */
+export const hasWebHistoryBeenInitialized = () => {
+  if (typeof localStorage === 'undefined') return false
+  return (
+    localStorage.getItem(WEB_HISTORY_STORAGE_KEY) !== null ||
+    localStorage.getItem(HISTORY_PERSISTED_MARKER_KEY) === '1'
+  )
+}
+
+// ===== UNIFIED API (Electron: file | Browser: localStorage) =====
+
 export const saveHistory = async (historyArray) => {
-  // Validate input
   if (!Array.isArray(historyArray)) {
     console.error('[saveHistory] historyArray is not an array:', historyArray)
     return false
   }
-  
+
   console.log(`[saveHistory] Saving ${historyArray.length} history items`)
-  
-  if (!isElectron()) {
-    console.error('[saveHistory] Not running in Electron - nativeAPI not available')
-    return false
+
+  if (isElectron()) {
+    const result = await saveHistoryFileSystem(historyArray)
+    if (result) {
+      markHistoryPersistedOnDevice()
+      console.log(`[saveHistory] Successfully saved ${historyArray.length} items`)
+    } else {
+      console.error(`[saveHistory] Failed to save ${historyArray.length} items`)
+    }
+    return result
   }
-  
-  const result = await saveHistoryFileSystem(historyArray)
-  
-  if (result) {
-    console.log(`[saveHistory] Successfully saved ${historyArray.length} items`)
+
+  const ok = saveHistoryWeb(historyArray)
+  if (ok) {
+    markHistoryPersistedOnDevice()
+    console.log(`[saveHistory] Saved ${historyArray.length} items to localStorage`)
   } else {
-    console.error(`[saveHistory] Failed to save ${historyArray.length} items`)
+    console.error('[saveHistory] Failed to save to localStorage')
   }
-  
-  return result
+  return ok
 }
 
-// Load history (uses file system via nativeAPI)
 export const loadHistory = async () => {
-  if (!isElectron()) {
-    console.error('[loadHistory] Not running in Electron - nativeAPI not available')
-    return []
+  if (isElectron()) {
+    const result = await loadHistoryFileSystem()
+    if (result.length > 0) {
+      markHistoryPersistedOnDevice()
+    }
+    console.log(`[loadHistory] Loaded ${result.length} history items`)
+    return result
   }
-  
-  const result = await loadHistoryFileSystem()
-  console.log(`[loadHistory] Loaded ${result.length} history items`)
+
+  const result = loadHistoryWeb()
+  console.log(`[loadHistory] Loaded ${result.length} history items from localStorage`)
   return result
 }
 
-// Clear all history (local only, keeps Google Drive backup)
 export const clearHistory = async () => {
-  if (!isElectron()) {
-    console.error('[clearHistory] Not running in Electron - nativeAPI not available')
-    return false
-  }
-  
-  // Save empty array to clear local history
-  // Google Drive backup is NOT deleted - user can restore later
   return await saveHistory([])
 }
 
-// Delete a specific item from history
 export const deleteHistoryItem = async (id) => {
   try {
     const currentHistory = await loadHistory()
-    const updatedHistory = currentHistory.filter(item => item.id !== id)
-    await saveHistory(updatedHistory)
-    return true
+    const updatedHistory = currentHistory.filter((item) => item.id !== id)
+    return await saveHistory(updatedHistory)
   } catch (error) {
     console.error('Error deleting item:', error)
     return false
   }
 }
 
-// Get storage type (for debugging/info)
+/** Remove many history entries in one read/save (avoids races when deleting all lists for a person). */
+export const deleteHistoryItems = async (ids) => {
+  if (!Array.isArray(ids) || ids.length === 0) return true
+  try {
+    const idSet = new Set(ids)
+    const currentHistory = await loadHistory()
+    const updatedHistory = currentHistory.filter((item) => !idSet.has(item.id))
+    return await saveHistory(updatedHistory)
+  } catch (error) {
+    console.error('Error deleting history items:', error)
+    return false
+  }
+}
+
 export const getStorageType = () => {
-  return isElectron() ? 'file-system' : 'none'
+  return isElectron() ? 'file-system' : 'localStorage'
+}
+
+// ===== INVENTORY STORAGE (Electron: file | Browser: localStorage) =====
+
+export const WEB_INVENTORY_STORAGE_KEY = 'weight_dashboard_inventory'
+
+const loadInventoryWeb = () => {
+  if (typeof localStorage === 'undefined') return []
+  try {
+    const raw = localStorage.getItem(WEB_INVENTORY_STORAGE_KEY)
+    if (raw === null) return []
+    const data = JSON.parse(raw)
+    return Array.isArray(data) ? data : []
+  } catch (e) {
+    console.warn('[Storage] loadInventoryWeb parse error:', e)
+    return []
+  }
+}
+
+const saveInventoryWeb = (inventoryArray) => {
+  if (typeof localStorage === 'undefined') return false
+  try {
+    localStorage.setItem(WEB_INVENTORY_STORAGE_KEY, JSON.stringify(inventoryArray))
+    return true
+  } catch (e) {
+    console.error('[Storage] saveInventoryWeb failed:', e)
+    return false
+  }
+}
+
+export const loadInventory = async () => {
+  if (isElectron()) {
+    if (typeof window === 'undefined' || !window.nativeAPI || !window.nativeAPI.readInventory) {
+      console.error('[loadInventory] nativeAPI.readInventory not available')
+      return []
+    }
+    const result = await window.nativeAPI.readInventory()
+    return Array.isArray(result) ? result : []
+  }
+  return loadInventoryWeb()
+}
+
+export const saveInventory = async (inventoryArray) => {
+  if (!Array.isArray(inventoryArray)) {
+    console.error('[saveInventory] inventoryArray is not an array:', inventoryArray)
+    return false
+  }
+
+  if (isElectron()) {
+    if (typeof window === 'undefined' || !window.nativeAPI || !window.nativeAPI.saveInventory) {
+      console.error('[saveInventory] nativeAPI.saveInventory not available')
+      return false
+    }
+    return await window.nativeAPI.saveInventory(inventoryArray)
+  }
+
+  return saveInventoryWeb(inventoryArray)
 }
 
 // ===== PAYMENT STORAGE FUNCTIONS =====
@@ -370,6 +495,23 @@ export const getGoogleDriveAuthUrl = async () => {
   } catch (error) {
     console.error('[Storage] Error getting Google Drive auth URL:', error)
     console.error('[Storage] Error stack:', error.stack)
+    return { success: false, error: error.message }
+  }
+}
+
+// Modern desktop auth (loopback). One click, no copy/paste.
+export const connectGoogleDriveDesktop = async () => {
+  if (!isElectron()) {
+    return { success: false, error: 'Not in Electron' }
+  }
+
+  try {
+    if (typeof window === 'undefined' || !window.nativeAPI || !window.nativeAPI.googleDriveConnect) {
+      return { success: false, error: 'nativeAPI.googleDriveConnect not available' }
+    }
+    const result = await window.nativeAPI.googleDriveConnect()
+    return result
+  } catch (error) {
     return { success: false, error: error.message }
   }
 }

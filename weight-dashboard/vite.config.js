@@ -5,7 +5,10 @@ export default defineConfig({
 	plugins: [react()],
 	base: './', // Use relative paths for Electron compatibility
 	server: {
-		open: false // Don't open browser automatically - Electron will open instead
+		open: false, // Don't open browser automatically - Electron will open instead
+		port: 5173,
+		// Avoid silent jump to 5174 (breaks wait-on + confuses "port in use" with COM/serial)
+		strictPort: true,
 	},
 	build: {
 		outDir: 'dist',

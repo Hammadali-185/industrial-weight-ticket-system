@@ -122,35 +122,12 @@ Lot No: ${formData.lotNo}`
     }))
   }
 
-  // Print ticket
-  const printTicket = async () => {
-    const netWeight = calculateNetWeight()
-    
-    // Use current box number for printing, then increment after
-    const currentBoxNumber = formData.boxNumber
-    
-    // Generate QR code data string dynamically using the same data as preview
-    const qrData = `Box No: ${currentBoxNumber}
-Twist: ${formData.twist}
-Date: ${getCurrentDate()}
-Grade: AA
-Cones: ${formData.cones}
-G.W: ${stableWeight?.toFixed(3) || '0.000'}
-N.W: ${netWeight?.toFixed(3) || '0.000'}
-Lot No: ${formData.lotNo}`
+  const buildTicketPrintHtml = ({ currentBoxNumber, netWeight, qrImageUrl }) => {
+    const qrBlock = qrImageUrl
+      ? `<img id="qr-img" src="${qrImageUrl}" alt="QR Code" width="80" height="80" />`
+      : `QR Code Error`
 
-    try {
-      // Generate QR code as Base64 image in React before opening print window
-      const qrImageUrl = await QRCode.toDataURL(qrData, {
-        width: 100,
-        margin: 1,
-        color: { dark: '#000000', light: '#FFFFFF' }
-      })
-
-      // Open print window
-      const printWindow = window.open('', '_blank')
-      
-      printWindow.document.write(`
+    return `
         <!DOCTYPE html>
         <html>
           <head>
@@ -206,6 +183,7 @@ Lot No: ${formData.lotNo}`
                 display: flex;
                 align-items: center;
                 justify-content: center;
+                ${qrImageUrl ? '' : 'border: 1px solid #ccc; font-size: 6px; text-align: center; background: white;'}
               }
               .row { 
                 display: flex; 
@@ -273,7 +251,7 @@ Lot No: ${formData.lotNo}`
                     </div>
                   </div>
                   <div class="qr-code">
-                    <img id="qr-img" src="${qrImageUrl}" alt="QR Code" width="80" height="80" />
+                    ${qrBlock}
                   </div>
                 </div>
               </div>
@@ -283,89 +261,95 @@ Lot No: ${formData.lotNo}`
             </div>
           </body>
         </html>
-      `)
-      
-      printWindow.document.close()
-      
-      // Flag to track if increment has happened
-      let incremented = false
-      
-      // Wait for the QR image to fully load before printing
-      const img = printWindow.document.getElementById('qr-img')
-      img.onload = () => {
-        printWindow.print()
-        // Increment box number after printing
-        if (!incremented) {
+      `
+  }
+
+  const printHtmlInBrowserPopup = ({ html, onPrinted }) => {
+    const printWindow = window.open('', '_blank')
+    if (!printWindow) {
+      console.error('Print window blocked — allow pop-ups for this app.')
+      return
+    }
+
+    printWindow.document.write(html)
+    printWindow.document.close()
+
+    // If there is a QR image, wait for it to load before printing to avoid blank QR.
+    let finished = false
+    let fallbackId = null
+    const runPrintOnce = () => {
+      if (finished) return
+      finished = true
+      if (fallbackId != null) clearTimeout(fallbackId)
+      printWindow.print()
+      if (typeof onPrinted === 'function') onPrinted()
+    }
+
+    const img = printWindow.document.getElementById('qr-img')
+    if (!img) {
+      runPrintOnce()
+    } else if (img.complete && img.naturalWidth > 0) {
+      runPrintOnce()
+    } else {
+      img.onload = () => runPrintOnce()
+      fallbackId = window.setTimeout(() => runPrintOnce(), 800)
+    }
+  }
+
+  // Print ticket
+  const printTicket = async () => {
+    const netWeight = calculateNetWeight()
+    
+    // Use current box number for printing, then increment after
+    const currentBoxNumber = formData.boxNumber
+    
+    // Generate QR code data string dynamically using the same data as preview
+    const qrData = `Box No: ${currentBoxNumber}
+Twist: ${formData.twist}
+Date: ${getCurrentDate()}
+Grade: AA
+Cones: ${formData.cones}
+G.W: ${stableWeight?.toFixed(3) || '0.000'}
+N.W: ${netWeight?.toFixed(3) || '0.000'}
+Lot No: ${formData.lotNo}`
+
+    try {
+      // Generate QR code as Base64 image in React before opening print window
+      const qrImageUrl = await QRCode.toDataURL(qrData, {
+        width: 100,
+        margin: 1,
+        color: { dark: '#000000', light: '#FFFFFF' }
+      })
+
+      const html = buildTicketPrintHtml({ currentBoxNumber, netWeight, qrImageUrl })
+
+      // Electron: silent print via main process (no popup / no dialog).
+      if (typeof window !== 'undefined' && window.nativeAPI?.printTicketHtml) {
+        const result = await window.nativeAPI.printTicketHtml(html, { silent: true })
+        if (result && result.success) {
           incrementBoxNumber()
-          incremented = true
+          return
         }
+        console.error('Silent print failed, falling back to browser print:', result)
       }
-      
-      // Fallback: print after a short delay if onload doesn't fire
-      setTimeout(() => {
-        printWindow.print()
-        // Increment box number after printing (only if not already incremented)
-        if (!incremented) {
-          incrementBoxNumber()
-          incremented = true
-        }
-      }, 500)
+
+      // Browser (or Electron fallback): open a print window + show OS dialog.
+      printHtmlInBrowserPopup({ html, onPrinted: incrementBoxNumber })
       
     } catch (error) {
       console.error('Error generating QR code:', error)
-      // Fallback: open print window without QR code
-      const printWindow = window.open('', '_blank')
-      printWindow.document.write(`
-        <!DOCTYPE html>
-        <html>
-          <head>
-            <title>Fabric Roll Ticket - Saqib Silk Industry</title>
-            <style>
-              body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: white; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-              .ticket { width: 300px; border: 2px solid #000; margin: 0 auto; }
-              .header { background: #fbbf24 !important; padding: 15px; text-align: center; border-bottom: 2px solid #000; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-              .header h1 { margin: 0; font-size: 18px; font-weight: bold; color: #000; }
-              .header p { margin: 5px 0 0 0; font-size: 12px; color: #000; }
-              .body { padding: 15px; background: white; }
-              .content { display: flex; justify-content: space-between; }
-              .data { flex: 1; }
-              .qr-code { width: 80px; height: 80px; margin-left: 15px; border: 1px solid #ccc; display: flex; align-items: center; justify-content: center; font-size: 6px; text-align: center; background: white; }
-              .row { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 14px; }
-              .label { font-weight: bold; color: #000; }
-              .value { color: #000; }
-              .footer { text-align: center; font-size: 10px; color: #666; margin-top: 10px; border-top: 1px solid #ccc; padding-top: 10px; }
-            </style>
-          </head>
-          <body>
-            <div class="ticket">
-              <div class="header">
-                <h1>SAQIB SILK INDUSTRY</h1>
-                <p>Contact: [Your Phone Number]</p>
-              </div>
-              <div class="body">
-                <div class="content">
-                  <div class="data">
-                    <div class="row"><span class="label">Box No:</span><span class="value">${currentBoxNumber}</span></div>
-                    <div class="row"><span class="label">Twist:</span><span class="value">${formData.twist}</span></div>
-                    <div class="row"><span class="label">Date:</span><span class="value">${getCurrentDate()}</span></div>
-                    <div class="row"><span class="label">Grade:</span><span class="value">AA</span></div>
-                    <div class="row"><span class="label">Cones:</span><span class="value">${formData.cones}</span></div>
-                    <div class="row"><span class="label">G.W:</span><span class="value">${stableWeight?.toFixed(3) || '0.000'} kg</span></div>
-                    <div class="row"><span class="label">N.W:</span><span class="value">${netWeight?.toFixed(3) || '0.000'} kg</span></div>
-                    <div class="row"><span class="label">Lot No:</span><span class="value">${formData.lotNo}</span></div>
-                  </div>
-                  <div class="qr-code">QR Code Error</div>
-                </div>
-              </div>
-              <div class="footer"><!-- Address removed as requested --></div>
-            </div>
-          </body>
-        </html>
-      `)
-      printWindow.document.close()
-      printWindow.print()
-      // Increment box number after printing (fallback case)
-      incrementBoxNumber()
+      const html = buildTicketPrintHtml({ currentBoxNumber, netWeight, qrImageUrl: null })
+
+      if (typeof window !== 'undefined' && window.nativeAPI?.printTicketHtml) {
+        const result = await window.nativeAPI.printTicketHtml(html, { silent: true })
+        if (result && result.success) {
+          incrementBoxNumber()
+          return
+        }
+        console.error('Silent print failed, falling back to browser print:', result)
+      }
+
+      printHtmlInBrowserPopup({ html, onPrinted: incrementBoxNumber })
     }
   }
 

@@ -22,7 +22,10 @@ export default function Header({ status, onReconnect, theme, setTheme }) {
 			<div className="flex items-center gap-3">
 				{badge}
 				<button
-					onClick={onReconnect}
+					type="button"
+					onClick={() => {
+						void onReconnect()
+					}}
 					className="px-4 py-2 rounded-lg bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-500 hover:to-blue-400 transition-all duration-200 text-white font-medium shadow-lg hover:shadow-xl transform hover:-translate-y-0.5">
 					🔄 Reconnect Weight Machine
 				</button>

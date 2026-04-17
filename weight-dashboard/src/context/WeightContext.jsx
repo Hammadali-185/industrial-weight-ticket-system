@@ -20,10 +20,12 @@ export const WeightProvider = ({ children }) => {
     status,
     port,
     baud,
+    serialLineCoding,
     logs,
     readings,
     stableWeight: serialStableWeight,
-    reconnect
+    reconnect,
+    serialPreview
   } = useSerialConnection()
 
   // Global state for weight
@@ -51,9 +53,11 @@ export const WeightProvider = ({ children }) => {
     status, // Primary status from serial connection
     port,
     baud,
+    serialLineCoding,
     logs,
     readings,
     reconnect,
+    serialPreview,
     // Keep these for backward compatibility if needed
     updateStableWeight: useCallback((weight) => {
       setStableWeight(weight)

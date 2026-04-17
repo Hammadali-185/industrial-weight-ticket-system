@@ -31,6 +31,16 @@ try {
   requestReconnect: () => {
     return ipcRenderer.invoke('request-reconnect')
   },
+
+  // Silent HTML printing (Electron only)
+  printTicketHtml: (html, options = {}) => {
+    return ipcRenderer.invoke('print-ticket-html', { html, ...options })
+  },
+
+  // Generic silent HTML printing (Electron only)
+  printHtml: (html, options = {}) => {
+    return ipcRenderer.invoke('print-html', { html, ...options })
+  },
   
   // Storage operations (for UI lists)
   readHistory: () => ipcRenderer.invoke('read-history'),
@@ -39,6 +49,10 @@ try {
   // Payment operations
   readPayments: () => ipcRenderer.invoke('read-payments'),
   savePayments: (data) => ipcRenderer.invoke('save-payments', data),
+
+  // Inventory operations
+  readInventory: () => ipcRenderer.invoke('read-inventory'),
+  saveInventory: (data) => ipcRenderer.invoke('save-inventory', data),
   
   // List file operations
   saveListFile: (data) => ipcRenderer.invoke('save-list-file', data),
@@ -49,6 +63,7 @@ try {
   
   // Google Drive operations
   googleDriveGetAuthUrl: () => ipcRenderer.invoke('google-drive-get-auth-url'),
+  googleDriveConnect: () => ipcRenderer.invoke('google-drive-connect'),
   googleDriveAuthCode: (code) => ipcRenderer.invoke('google-drive-auth-code', code),
   googleDriveCheckAuth: () => ipcRenderer.invoke('google-drive-check-auth'),
   googleDriveUpload: (historyData) => ipcRenderer.invoke('google-drive-upload', historyData),
@@ -84,6 +99,8 @@ try {
     saveHistory: () => {},
     readPayments: () => {},
     savePayments: () => {},
+    readInventory: () => {},
+    saveInventory: () => {},
     saveListFile: () => {},
     readListings: () => {},
     readLogs: () => {},

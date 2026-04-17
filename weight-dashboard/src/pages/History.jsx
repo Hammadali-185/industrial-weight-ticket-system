@@ -1,5 +1,20 @@
-import React, { useState, useEffect } from 'react'
-import { loadHistory, saveHistory, clearHistory, deleteHistoryItem, loadListings, checkGoogleDriveAuth, getGoogleDriveAuthUrl, authenticateGoogleDrive, downloadHistoryFromDrive, revokeGoogleDriveAccess, uploadHistoryToDrive } from '../utils/storage'
+import React, { useState, useEffect, useRef } from 'react'
+import {
+  loadHistory,
+  saveHistory,
+  clearHistory,
+  deleteHistoryItem,
+  deleteHistoryItems,
+  hasWebHistoryBeenInitialized,
+  loadListings,
+  checkGoogleDriveAuth,
+  getGoogleDriveAuthUrl,
+  connectGoogleDriveDesktop,
+  authenticateGoogleDrive,
+  downloadHistoryFromDrive,
+  revokeGoogleDriveAccess,
+  uploadHistoryToDrive,
+} from '../utils/storage'
 
 const History = () => {
   const [activeTab, setActiveTab] = useState('history') // 'history', 'listings'
@@ -15,6 +30,8 @@ const History = () => {
   const [googleDriveLoading, setGoogleDriveLoading] = useState(false)
   const [showAuthCodeInput, setShowAuthCodeInput] = useState(false)
   const [authCodeInput, setAuthCodeInput] = useState('')
+  const deletePersonInFlightRef = useRef(false)
+  const clearAllInFlightRef = useRef(false)
 
   // Load data from storage on mount and when page becomes visible
   useEffect(() => {
@@ -199,7 +216,7 @@ const History = () => {
             const nw = parseFloat(item.netWeight) || 0
             const gw = parseFloat(item.grossWeight) || 0
             const cones = parseInt(item.cones || item.date || '0', 10) || 0
-            const lbs = nw * 2.20
+            const lbs = nw * 2.2046
             
             return {
               totalNW: acc.totalNW + nw,
@@ -265,8 +282,12 @@ const History = () => {
         console.log('[History] 📋 Items with name:', parsed.filter(item => item?.name).length)
       }
       
-      // Auto-recover: If storage is empty, try Google Drive backup
-      if (!parsed || parsed.length === 0) {
+      // Auto-recover: If storage is empty, try Google Drive backup only on first-ever load
+      // (no local history key / no persisted marker). Electron used to always allow recover
+      // because history lives in a file, not weight_dashboard_history — that re-imported Drive after every delete.
+      const allowEmptyAutoRecover = !hasWebHistoryBeenInitialized()
+
+      if ((!parsed || parsed.length === 0) && allowEmptyAutoRecover) {
         console.log('[History] ⚠️ History is empty, checking Google Drive backup...')
         try {
           // Check if Google Drive is connected
@@ -318,34 +339,62 @@ const History = () => {
     }
   }
 
-  // Delete a list from history
-  const deleteList = async (id) => {
-    if (window.confirm('Are you sure you want to delete this list from history?')) {
-      try {
-        await deleteHistoryItem(id)
-        const updatedHistory = history.filter(item => item.id !== id)
-        setHistory(updatedHistory)
-        setFilteredHistory(updatedHistory.filter(item => 
-          searchName.trim() === '' || 
-          item.name.toLowerCase().includes(searchName.toLowerCase()) ||
-          (item.displayName && item.displayName.toLowerCase().includes(searchName.toLowerCase()))
-        ))
-      } catch (error) {
-        console.error('Error deleting list:', error)
+  // Delete a single history entry (one confirm). Group “Delete” uses deletePersonLists instead.
+  const deleteList = async (id, options = {}) => {
+    const { skipConfirm = false } = options
+    if (!skipConfirm && !window.confirm('Are you sure you want to delete this list from history?')) {
+      return
+    }
+    try {
+      const ok = await deleteHistoryItem(id)
+      if (!ok) {
+        console.error('[History] Delete failed to persist')
+        return
       }
+      setHistory((prev) => prev.filter((item) => item.id !== id))
+    } catch (error) {
+      console.error('Error deleting list:', error)
+    }
+  }
+
+  /** All saved lists for one person — one confirm, one save (no per-list confirm). */
+  const deletePersonLists = async (personName, lists) => {
+    if (deletePersonInFlightRef.current) return
+    deletePersonInFlightRef.current = true
+    try {
+      if (!window.confirm(`Are you sure you want to delete all lists for ${personName}?`)) {
+        return
+      }
+      const ids = lists.map((l) => l.id)
+      const ok = await deleteHistoryItems(ids)
+      if (!ok) {
+        alert('Could not save deletion. If you are in the browser, check storage is not full.')
+        return
+      }
+      const idSet = new Set(ids)
+      setHistory((prev) => prev.filter((item) => !idSet.has(item.id)))
+    } catch (error) {
+      console.error('Error deleting person lists:', error)
+    } finally {
+      deletePersonInFlightRef.current = false
     }
   }
 
   // Clear all history
   const clearAllHistory = async () => {
-    if (window.confirm('Are you sure you want to delete ALL history? This cannot be undone.')) {
-      try {
-        await clearHistory()
-        setHistory([])
-        setFilteredHistory([])
-      } catch (error) {
-        console.error('Error clearing history:', error)
+    if (clearAllInFlightRef.current) return
+    clearAllInFlightRef.current = true
+    try {
+      if (!window.confirm('Are you sure you want to delete ALL history? This cannot be undone.')) {
+        return
       }
+      await clearHistory()
+      setHistory([])
+      setFilteredHistory([])
+    } catch (error) {
+      console.error('Error clearing history:', error)
+    } finally {
+      clearAllInFlightRef.current = false
     }
   }
 
@@ -389,6 +438,24 @@ const History = () => {
   const connectGoogleDrive = async () => {
     try {
       setGoogleDriveLoading(true)
+
+      // Electron desktop: loopback OAuth (one click, no copy/paste)
+      if (typeof window !== 'undefined' && window.nativeAPI?.googleDriveConnect) {
+        const result = await connectGoogleDriveDesktop()
+        if (result && result.success) {
+          alert('✅ Successfully connected to Google Drive!\n\nYour history will now be automatically backed up to Google Drive every time you save.')
+          await checkGoogleDriveStatus()
+          // Also backup current history if any exists
+          if (history.length > 0) {
+            await uploadHistoryToDrive(history)
+          }
+          return
+        }
+        const errorMsg = (result && result.error) || 'Unknown error'
+        alert('❌ Failed to connect to Google Drive:\n\n' + errorMsg)
+        return
+      }
+
       console.log('[History] Getting Google Drive auth URL...')
       const result = await getGoogleDriveAuthUrl()
       console.log('[History] Auth URL result:', result)
@@ -823,7 +890,7 @@ const History = () => {
                       const nw = parseFloat(item.netWeight) || 0
                       const gw = parseFloat(item.grossWeight) || 0
                       const cones = parseInt(item.cones || item.date || '0', 10) || 0
-                      const lbs = nw * 2.20462
+                      const lbs = nw * 2.2046
                       
                       return {
                         totalNW: acc.totalNW + nw,
@@ -884,17 +951,15 @@ const History = () => {
                           </div>
                           <div className="flex gap-2">
                             <button
+                              type="button"
                               onClick={() => setSelectedPerson(selectedPerson === person.name ? null : person.name)}
                               className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white font-semibold rounded-lg transition-colors duration-200"
                             >
                               {selectedPerson === person.name ? 'Hide' : 'View'} Boxes
                             </button>
                             <button
-                              onClick={() => {
-                                if (window.confirm(`Are you sure you want to delete all lists for ${person.name}?`)) {
-                                  personBoxes.forEach(list => deleteList(list.id))
-                                }
-                              }}
+                              type="button"
+                              onClick={() => deletePersonLists(person.name, personBoxes)}
                               className="px-4 py-2 bg-red-500 hover:bg-red-600 text-white font-semibold rounded-lg transition-colors duration-200"
                             >
                               Delete
@@ -961,7 +1026,7 @@ const History = () => {
                                       const nw = parseFloat(box.netWeight) || 0
                                       const gw = parseFloat(box.grossWeight) || 0
                                       const cones = parseInt(box.cones || box.date || '0', 10) || 0
-                                      const lbs = nw * 2.20
+                                      const lbs = nw * 2.2046
                                       
                                       return {
                                         totalNW: acc.totalNW + nw,
@@ -975,7 +1040,7 @@ const History = () => {
                                       <>
                                         {uniqueBoxes.map((box, idx) => {
                                           const nw = parseFloat(box.netWeight) || 0
-                                          const lbs = (nw * 2.20).toFixed(3)
+                                          const lbs = (nw * 2.2046).toFixed(3)
                                           return (
                                             <tr key={idx} className="hover:bg-yellow-50">
                                               <td className="border border-gray-300 px-2 py-2 text-black text-sm">{box.boxNumber}</td>

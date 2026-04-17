@@ -73,6 +73,16 @@ const Navbar = () => {
             >
               Payment
             </Link>
+            <Link
+              to="/inventory"
+              className={`px-3 py-2 rounded-md text-sm font-medium transition-colors duration-200 ${
+                location.pathname === '/inventory'
+                  ? 'bg-yellow-400 text-black font-bold'
+                  : 'text-gray-600 hover:text-black hover:bg-yellow-100'
+              }`}
+            >
+              Inventory
+            </Link>
           </div>
         </div>
       </div>

@@ -11,7 +11,7 @@
 		"build": "vite build",
 		"preview": "vite preview",
 		"electron": "electron .",
-		"electron-dev": "concurrently \"npm run dev\" \"wait-on http://localhost:5173 http://localhost:5174 && timeout /t 2 /nobreak >nul && electron .\"",
+		"electron-dev": "concurrently \"npm run dev\" \"wait-on http://localhost:5173 && electron .\"",
 		"electron-build": "npm run build && set CSC_IDENTITY_AUTO_DISCOVERY=false && electron-builder",
 		"electron-pack": "npm run build && electron-builder --dir",
 		"clear-cache": "rmdir /s /q \"%LOCALAPPDATA%\\electron-builder\\Cache\\winCodeSign\" 2>nul || echo Cache cleared",
@@ -50,8 +50,13 @@
 		"appId": "com.weight.dashboard",
 		"productName": "Weight Dashboard",
 		"directories": {
-			"output": "dist"
+			"output": "release"
 		},
+		"asar": true,
+		"asarUnpack": [
+			"**/node_modules/serialport/**/*",
+			"**/node_modules/@serialport/**/*"
+		],
 		"files": [
 			"dist/**/*",
 			"main.cjs",

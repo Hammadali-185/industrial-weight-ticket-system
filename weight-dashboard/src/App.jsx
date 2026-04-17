@@ -7,6 +7,7 @@ import TicketGenerator from './pages/TicketGenerator'
 import GenerateList from './pages/GenerateList'
 import History from './pages/History'
 import Payment from './pages/Payment'
+import Inventory from './pages/Inventory'
 
 function App() {
   console.log('App component rendered')
@@ -22,6 +23,7 @@ function App() {
             <Route path="/generate-list" element={<GenerateList />} />
             <Route path="/history" element={<History />} />
             <Route path="/payment" element={<Payment />} />
+            <Route path="/inventory" element={<Inventory />} />
             <Route path="*" element={<div>Page not found</div>} />
           </Routes>
         </div>

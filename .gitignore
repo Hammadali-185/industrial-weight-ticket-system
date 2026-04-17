@@ -56,3 +56,6 @@ coverage/
 # Weight data (contains business data - should not be committed)
 weight-dashboard/weightdata/
 
+# Packaged installers/artifacts
+weight-dashboard/release/
+

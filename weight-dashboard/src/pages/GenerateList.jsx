@@ -1,7 +1,226 @@
 import React, { useState, useEffect, useRef } from 'react'
 import jsPDF from 'jspdf'
 import html2canvas from 'html2canvas'
-import { saveHistory } from '../utils/storage'
+import { loadInventory, saveHistory, saveInventory } from '../utils/storage'
+
+const todayISO = () => {
+  // Local date (not UTC) in YYYY-MM-DD
+  const d = new Date()
+  d.setMinutes(d.getMinutes() - d.getTimezoneOffset())
+  return d.toISOString().slice(0, 10)
+}
+
+const normalizeKey = (s) => String(s || '').trim().toLowerCase()
+
+const uniqBoxesFromScannedList = (scannedList) => {
+  const scanned = Array.isArray(scannedList) ? scannedList : []
+  const seen = new Set()
+  const unique = []
+  for (const box of scanned) {
+    const boxKey = `${box?.boxNumber}-${box?.netWeight}-${box?.grossWeight}-${box?.cones}`
+    if (seen.has(boxKey)) continue
+    seen.add(boxKey)
+    unique.push(box)
+  }
+  return unique
+}
+
+const computeBalanceMap = (txns) => {
+  const map = new Map()
+  const list = Array.isArray(txns) ? txns : []
+  for (const t of list) {
+    const effectiveCompany = normalizeKey(t?.linkedCompanyName || t?.companyName)
+    const lot = normalizeKey(t?.lot)
+    if (!effectiveCompany || !lot) continue
+    const key = `${effectiveCompany}__${lot}`
+    const prev = map.get(key) || { boxes: 0, weightKg: 0 }
+
+    const sign = t?.type === 'out' ? -1 : 1
+    const boxes = Number(t?.boxes) || 0
+    const weightKg = Number(t?.totalWeightKg) || 0
+
+    prev.boxes += sign * boxes
+    prev.weightKg += sign * weightKg
+    map.set(key, prev)
+  }
+  return map
+}
+
+/** Tighter typography/padding when there are many rows (before scale-to-fit). */
+function computeListPrintLayout(rowCount) {
+  if (rowCount <= 12) {
+    return { cellPad: '3mm', titlePt: '16pt', infoPt: '9pt', thPt: '9pt', tdPt: '8pt', totalPt: '10pt', footerPt: '8pt', boxPad: '10mm' }
+  }
+  if (rowCount <= 22) {
+    return { cellPad: '2mm', titlePt: '14pt', infoPt: '8pt', thPt: '8pt', tdPt: '7pt', totalPt: '9pt', footerPt: '7pt', boxPad: '8mm' }
+  }
+  if (rowCount <= 35) {
+    return { cellPad: '1.5mm', titlePt: '12pt', infoPt: '7.5pt', thPt: '7pt', tdPt: '6.5pt', totalPt: '8pt', footerPt: '6.5pt', boxPad: '6mm' }
+  }
+  if (rowCount <= 50) {
+    return { cellPad: '1.2mm', titlePt: '11pt', infoPt: '7pt', thPt: '6.5pt', tdPt: '6pt', totalPt: '7pt', footerPt: '6pt', boxPad: '5mm' }
+  }
+  if (rowCount <= 65) {
+    return {
+      cellPad: '0.9mm',
+      titlePt: '10pt',
+      infoPt: '6.2pt',
+      thPt: '5.8pt',
+      tdPt: '5.2pt',
+      totalPt: '6.2pt',
+      footerPt: '5.2pt',
+      boxPad: '3.5mm',
+    }
+  }
+  if (rowCount <= 85) {
+    return {
+      cellPad: '0.7mm',
+      titlePt: '9pt',
+      infoPt: '5.8pt',
+      thPt: '5.3pt',
+      tdPt: '4.9pt',
+      totalPt: '5.8pt',
+      footerPt: '4.9pt',
+      boxPad: '3mm',
+    }
+  }
+  return {
+    cellPad: '0.55mm',
+    titlePt: '8pt',
+    infoPt: '5.4pt',
+    thPt: '5pt',
+    tdPt: '4.6pt',
+    totalPt: '5.4pt',
+    footerPt: '4.6pt',
+    boxPad: '2.5mm',
+  }
+}
+
+const PRINT_PAGE_CSS = `
+  @page { size: A4 portrait; margin: 5mm; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #fff;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  #printFitViewport {
+    width: 200mm;
+    max-width: 100%;
+    height: 287mm;
+    max-height: 287mm;
+    overflow: hidden;
+    margin: 0 auto;
+    box-sizing: border-box;
+    position: relative;
+  }
+  #printFitContent {
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+  }
+  @media print {
+    html, body {
+      height: auto;
+      max-height: none;
+      overflow: hidden !important;
+    }
+    #printFitViewport {
+      page-break-after: avoid !important;
+      page-break-inside: avoid !important;
+      break-inside: avoid !important;
+    }
+    table, thead, tbody, tr, td, th {
+      page-break-inside: avoid !important;
+      break-inside: avoid !important;
+    }
+  }
+`
+
+/** Single A4 sheet: zoom scales layout (transform does not — causes a 2nd blank/extra page). */
+function buildGeneratedListPrintDocument(htmlContent) {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Generated List - Saqib Silk Industry</title>
+  <style>${PRINT_PAGE_CSS}
+    tr:nth-child(even) td { background-color: #f9fafb; }
+  </style>
+</head>
+<body>
+  <div id="printFitViewport">
+    <div id="printFitContent">${htmlContent}</div>
+  </div>
+  <script>
+(function () {
+  function fitToOneA4Page() {
+    var vp = document.getElementById('printFitViewport');
+    var ct = document.getElementById('printFitContent');
+    if (!vp || !ct) return;
+    document.documentElement.style.zoom = '';
+    document.body.style.zoom = '';
+    ct.style.transform = '';
+    ct.style.transformOrigin = '';
+    var vh = vp.clientHeight;
+    var vw = vp.clientWidth;
+    if (vh < 8 || vw < 8) return;
+    var sh = Math.max(ct.scrollHeight, ct.offsetHeight);
+    var sw = Math.max(ct.scrollWidth, ct.offsetWidth);
+    if (sh < 1 || sw < 1) return;
+    var scale = Math.min(1, vh / sh, vw / sw);
+    if ('zoom' in document.body.style) {
+      try {
+        document.body.style.zoom = String(scale);
+        return;
+      } catch (e1) {}
+    }
+    ct.style.transformOrigin = 'top center';
+    ct.style.transform = 'scale(' + scale + ')';
+  }
+  function schedulePrint() {
+    fitToOneA4Page();
+    window.focus();
+    setTimeout(function () { window.print(); }, 280);
+  }
+  window.addEventListener('beforeprint', fitToOneA4Page);
+  if (document.readyState === 'complete') setTimeout(schedulePrint, 80);
+  else window.addEventListener('load', function () { setTimeout(schedulePrint, 80); });
+})();
+  </script>
+</body>
+</html>`
+}
+
+function buildListRowsHtml(scannedList, totals, layout) {
+  const rows = scannedList
+    .map((item) => {
+      const nw = parseFloat(item.netWeight) || 0
+      const lbs = (nw * 2.2046).toFixed(3)
+      return `
+        <tr>
+          <td style="border: 1px solid #000; padding: ${layout.cellPad}; font-size: ${layout.tdPt};">${item.boxNumber}</td>
+          <td style="border: 1px solid #000; padding: ${layout.cellPad}; font-size: ${layout.tdPt};">${item.grossWeight}</td>
+          <td style="border: 1px solid #000; padding: ${layout.cellPad}; font-size: ${layout.tdPt};">${item.netWeight}</td>
+          <td style="border: 1px solid #000; padding: ${layout.cellPad}; font-size: ${layout.tdPt};">${item.cones || item.date || ''}</td>
+          <td style="border: 1px solid #000; padding: ${layout.cellPad}; font-size: ${layout.tdPt};">${lbs}</td>
+        </tr>`
+    })
+    .join('')
+  const totalRow =
+    scannedList.length > 0
+      ? `
+    <tr style="background-color: #fbbf24 !important; font-weight: bold;">
+      <td style="border: 1px solid #000; padding: ${layout.cellPad}; font-size: ${layout.totalPt};"><strong>TOTAL${scannedList.length}</strong></td>
+      <td style="border: 1px solid #000; padding: ${layout.cellPad}; font-size: ${layout.totalPt};"><strong>${totals.totalGW}</strong></td>
+      <td style="border: 1px solid #000; padding: ${layout.cellPad}; font-size: ${layout.totalPt};"><strong>${totals.totalNW}</strong></td>
+      <td style="border: 1px solid #000; padding: ${layout.cellPad}; font-size: ${layout.totalPt};"><strong>${totals.totalCones}</strong></td>
+      <td style="border: 1px solid #000; padding: ${layout.cellPad}; font-size: ${layout.totalPt};"><strong>${totals.totalLbs}</strong></td>
+    </tr>`
+      : ''
+  return rows + totalRow
+}
 
 const GenerateList = () => {
   const [scannedList, setScannedList] = useState([])
@@ -75,7 +294,7 @@ const GenerateList = () => {
       const nw = parseFloat(item.netWeight) || 0
       const gw = parseFloat(item.grossWeight) || 0
       const cones = parseInt(item.cones || item.date || '0', 10) || 0
-      const lbs = nw * 2.20
+      const lbs = nw * 2.2046
       
       return {
         totalNW: acc.totalNW + nw,
@@ -105,7 +324,7 @@ const GenerateList = () => {
         console.warn('[GenerateList] ⚠️ Cannot save: Name is empty')
         setSaveStatus({ message: '⚠️ Cannot save: Name is required', type: 'error' })
         setTimeout(() => setSaveStatus({ message: '', type: 'info' }), 3000)
-        return
+        return { saved: false, listData: null }
       }
       
       // Get existing history from file system via nativeAPI
@@ -188,7 +407,7 @@ const GenerateList = () => {
           const nw = parseFloat(item.netWeight) || 0
           const gw = parseFloat(item.grossWeight) || 0
           const cones = parseInt(item.cones || item.date || '0', 10) || 0
-          const lbs = nw * 2.20 // Use same conversion factor as calculateTotals
+          const lbs = nw * 2.2046 // Use same conversion factor as calculateTotals
           
           return {
             totalNW: acc.totalNW + nw,
@@ -318,8 +537,11 @@ const GenerateList = () => {
           // Don't fail the entire save if list file save fails
         }
       }
+
+      return { saved: !!saveResult, listData: listData || null }
     } catch (error) {
       console.error('[GenerateList] Error saving list to history:', error)
+      return { saved: false, listData: null }
     }
   }
 
@@ -669,8 +891,82 @@ const GenerateList = () => {
     // Save list to history before printing (even if empty, as long as there's a name)
     if (Name) {
       try {
-        await saveListToHistory()
+        const { saved, listData } = await saveListToHistory()
         console.log('[GenerateList] History saved before printing')
+
+        // Auto-create Inventory OUT on print (never blocks printing)
+        if (saved && listData) {
+          try {
+            const inv = await loadInventory()
+            const txns = Array.isArray(inv) ? inv : []
+
+            // Match by companyName (IN txns only), case-insensitive.
+            const inCompanyKeyToDisplay = new Map()
+            for (const t of txns) {
+              if (t?.type !== 'in') continue
+              const name = String(t?.companyName || '').trim()
+              if (!name) continue
+              inCompanyKeyToDisplay.set(normalizeKey(name), name)
+            }
+
+            const matchKey = normalizeKey(listData?.name || Name)
+            const matchedCompanyName = inCompanyKeyToDisplay.get(matchKey) || null
+            if (matchedCompanyName) {
+              const lot = '--'
+              if (lot) {
+                const uniqueBoxes = uniqBoxesFromScannedList(listData?.scannedList)
+                const boxes = uniqueBoxes.length
+                const totalWeightKgRaw = Number(listData?.totals?.totalNW)
+                const totalWeightKg = Number.isFinite(totalWeightKgRaw) ? totalWeightKgRaw : 0
+                const kgPerBox = boxes > 0 ? totalWeightKg / boxes : null
+
+                const balMap = computeBalanceMap(txns)
+                const balKey = `${normalizeKey(matchedCompanyName)}__${normalizeKey(lot)}`
+                const current = balMap.get(balKey) || { boxes: 0, weightKg: 0 }
+                const nextBoxes = current.boxes - boxes
+                const nextWeight = current.weightKg - totalWeightKg
+
+                if (nextBoxes < 0 || nextWeight < 0) {
+                  const ok = window.confirm(
+                    `This OUT will make balance negative for ${matchedCompanyName} (lot ${lot}).\n\nProceed anyway?`
+                  )
+                  if (!ok) {
+                    // Skip auto-out but still print
+                    throw new Error('Auto-OUT skipped by user (negative balance).')
+                  }
+                }
+
+                const outTxn = {
+                  id: Date.now(),
+                  type: 'out',
+                  dateISO: todayISO(),
+                  lot,
+                  boxes,
+                  kgPerBox,
+                  totalWeightKg,
+                  companyName: '--',
+                  linkedCompanyName: matchedCompanyName,
+                  source: 'generate-list-print',
+                  sourceListId: listData.id,
+                  createdAt: Date.now(),
+                }
+
+                const next = [outTxn, ...txns]
+                const okSave = await saveInventory(next)
+                if (okSave) {
+                  setNotification({ message: '✅ Inventory OUT created from printed list', type: 'success', show: true })
+                  setTimeout(() => setNotification({ message: '', type: 'info', show: false }), 2500)
+                } else {
+                  setNotification({ message: '⚠️ Printed, but could not save Inventory OUT', type: 'error', show: true })
+                  setTimeout(() => setNotification({ message: '', type: 'info', show: false }), 4000)
+                }
+              }
+            }
+          } catch (autoOutErr) {
+            // Never block printing due to inventory integration.
+            console.warn('[GenerateList] Auto-OUT on print skipped/failed:', autoOutErr)
+          }
+        }
       } catch (error) {
         console.error('[GenerateList] Error saving history before printing:', error)
         // Continue with printing even if save fails
@@ -678,63 +974,43 @@ const GenerateList = () => {
     }
     
     const totals = calculateTotals()
-    
+    const layout = computeListPrintLayout(scannedList.length)
+    const tableBodyHtml = buildListRowsHtml(scannedList, totals, layout)
+
     // Create a temporary container for PDF generation
     const tempDiv = document.createElement('div')
     tempDiv.style.position = 'absolute'
     tempDiv.style.left = '-9999px'
     tempDiv.style.width = '210mm'
-    tempDiv.style.padding = '10mm'
+    tempDiv.style.padding = '0'
     tempDiv.style.backgroundColor = 'white'
     tempDiv.style.fontFamily = 'Arial, sans-serif'
     
-    // Build HTML content
     const htmlContent = `
-      <div style="width: 100%; padding: 10mm; font-family: Arial, sans-serif; background: white;">
-        <h1 style="text-align: center; margin: 0 0 8mm 0; font-size: 16pt; font-weight: bold; color: #000;">
+      <div style="width: 100%; padding: ${layout.boxPad}; font-family: Arial, sans-serif; background: white; box-sizing: border-box;">
+        <h1 style="text-align: center; margin: 0 0 4mm 0; font-size: ${layout.titlePt}; font-weight: bold; color: #000;">
           SAQIB SILK INDUSTRY - Generated List
         </h1>
-        <div style="margin-bottom: 8mm; padding: 5mm; border: 1px solid #000; background-color: #f9fafb; font-size: 9pt;">
-          ${(getCurrentDate() || listTime || twist) ? `<div style="display: inline-block; margin-right: 15mm;"><strong>Date:</strong> ${getCurrentDate() || ''} | <strong>Time:</strong> ${listTime || ''} | <strong>Twist:</strong> ${twist || ''}</div>` : ''}
-          ${Name ? `<div style="display: inline-block; margin-right: 15mm;"><strong>Name:</strong> ${Name}</div>` : ''}
-          ${factoryName ? `<div style="display: inline-block; margin-right: 15mm;"><strong>Factory Name:</strong> ${factoryName}</div>` : ''}
+        <div style="margin-bottom: 4mm; padding: ${layout.cellPad}; border: 1px solid #000; background-color: #f9fafb; font-size: ${layout.infoPt};">
+          ${(getCurrentDate() || listTime || twist) ? `<div style="display: inline-block; margin-right: 8mm;"><strong>Date:</strong> ${getCurrentDate() || ''} | <strong>Time:</strong> ${listTime || ''} | <strong>Twist:</strong> ${twist || ''}</div>` : ''}
+          ${Name ? `<div style="display: inline-block; margin-right: 8mm;"><strong>Name:</strong> ${Name}</div>` : ''}
+          ${factoryName ? `<div style="display: inline-block; margin-right: 8mm;"><strong>Factory Name:</strong> ${factoryName}</div>` : ''}
         </div>
-        <table style="width: 100%; border-collapse: collapse; margin: 0; font-size: 9pt; table-layout: fixed;">
+        <table style="width: 100%; border-collapse: collapse; margin: 0; font-size: ${layout.thPt}; table-layout: fixed;">
           <thead>
             <tr style="background-color: #fbbf24;">
-              <th style="width: 12%; border: 1px solid #000; padding: 4mm; text-align: left; font-weight: bold; color: #000;">Box No</th>
-              <th style="width: 22%; border: 1px solid #000; padding: 4mm; text-align: left; font-weight: bold; color: #000;">G.W</th>
-              <th style="width: 22%; border: 1px solid #000; padding: 4mm; text-align: left; font-weight: bold; color: #000;">N.W</th>
-              <th style="width: 22%; border: 1px solid #000; padding: 4mm; text-align: left; font-weight: bold; color: #000;">Cones</th>
-              <th style="width: 22%; border: 1px solid #000; padding: 4mm; text-align: left; font-weight: bold; color: #000;">LBS</th>
+              <th style="width: 12%; border: 1px solid #000; padding: ${layout.cellPad}; text-align: left; font-weight: bold; color: #000; font-size: ${layout.thPt};">Box No</th>
+              <th style="width: 22%; border: 1px solid #000; padding: ${layout.cellPad}; text-align: left; font-weight: bold; color: #000; font-size: ${layout.thPt};">G.W</th>
+              <th style="width: 22%; border: 1px solid #000; padding: ${layout.cellPad}; text-align: left; font-weight: bold; color: #000; font-size: ${layout.thPt};">N.W</th>
+              <th style="width: 22%; border: 1px solid #000; padding: ${layout.cellPad}; text-align: left; font-weight: bold; color: #000; font-size: ${layout.thPt};">Cones</th>
+              <th style="width: 22%; border: 1px solid #000; padding: ${layout.cellPad}; text-align: left; font-weight: bold; color: #000; font-size: ${layout.thPt};">LBS</th>
             </tr>
           </thead>
           <tbody>
-            ${scannedList.map(item => {
-              const nw = parseFloat(item.netWeight) || 0
-              const lbs = (nw * 2.20).toFixed(3)
-              return `
-                <tr>
-                  <td style="border: 1px solid #000; padding: 4mm; font-size: 8pt;">${item.boxNumber}</td>
-                  <td style="border: 1px solid #000; padding: 4mm; font-size: 8pt;">${item.grossWeight}</td>
-                  <td style="border: 1px solid #000; padding: 4mm; font-size: 8pt;">${item.netWeight}</td>
-                  <td style="border: 1px solid #000; padding: 4mm; font-size: 8pt;">${item.cones || item.date || ''}</td>
-                  <td style="border: 1px solid #000; padding: 4mm; font-size: 8pt;">${lbs}</td>
-                </tr>
-              `
-            }).join('')}
-            ${scannedList.length > 0 ? `
-              <tr style="background-color: #fbbf24 !important; font-weight: bold; font-size: 10pt;">
-                <td style="border: 1px solid #000; padding: 4mm; font-size: 10pt;"><strong>TOTAL${scannedList.length}</strong></td>
-                <td style="border: 1px solid #000; padding: 4mm; font-size: 10pt;"><strong>${totals.totalGW}</strong></td>
-                <td style="border: 1px solid #000; padding: 4mm; font-size: 10pt;"><strong>${totals.totalNW}</strong></td>
-                <td style="border: 1px solid #000; padding: 4mm; font-size: 10pt;"><strong>${totals.totalCones}</strong></td>
-                <td style="border: 1px solid #000; padding: 4mm; font-size: 10pt;"><strong>${totals.totalLbs}</strong></td>
-              </tr>
-            ` : ''}
+            ${tableBodyHtml}
           </tbody>
         </table>
-        <div style="margin-top: 8mm; text-align: center; font-size: 8pt; color: #666;">
+        <div style="margin-top: 3mm; text-align: center; font-size: ${layout.footerPt}; color: #666;">
           Total Entries: ${scannedList.length}
           ${loaderName ? ` | Loader Name: ${loaderName}` : ''}
           ${loaderNumber ? ` | Loader Number: ${loaderNumber}` : ''}
@@ -754,13 +1030,23 @@ const GenerateList = () => {
         logging: false
       })
       
-      // Create PDF
+      // Single A4 page: fit entire capture in one page (scale down only)
       const pdf = new jsPDF('p', 'mm', 'a4')
       const imgData = canvas.toDataURL('image/png')
-      const imgWidth = 210 // A4 width in mm
-      const imgHeight = (canvas.height * imgWidth) / canvas.width
-      
-      pdf.addImage(imgData, 'PNG', 0, 0, imgWidth, imgHeight)
+      const pageW = 210
+      const pageH = 297
+      const marginMm = 5
+      const maxW = pageW - marginMm * 2
+      const maxH = pageH - marginMm * 2
+      let imgWmm = maxW
+      let imgHmm = (canvas.height * imgWmm) / canvas.width
+      if (imgHmm > maxH) {
+        imgHmm = maxH
+        imgWmm = (canvas.width * imgHmm) / canvas.height
+      }
+      const x = (pageW - imgWmm) / 2
+      const y = marginMm + (maxH - imgHmm) / 2
+      pdf.addImage(imgData, 'PNG', x, y, imgWmm, imgHmm)
       
       // Generate unique filename
       const filename = generateUniqueFilename(Name)
@@ -770,180 +1056,26 @@ const GenerateList = () => {
       
       // Clean up
       document.body.removeChild(tempDiv)
-      
-      // Also open print dialog for user to print if needed
-      const printWindow = window.open('', '_blank')
-      printWindow.document.write(`
-        <!DOCTYPE html>
-        <html>
-          <head>
-            <title>Generated List - Saqib Silk Industry</title>
-            <style>
-              @page {
-                size: A4;
-                margin: 15mm;
-              }
-              * {
-                box-sizing: border-box;
-              }
-              body {
-                font-family: Arial, sans-serif;
-                margin: 0;
-                padding: 0;
-                background: white;
-                font-size: 10pt;
-                width: 210mm;
-                min-height: 297mm;
-              }
-              .container {
-                width: 100%;
-                padding: 10mm;
-                page-break-inside: avoid;
-              }
-              h1 {
-                text-align: center;
-                margin: 0 0 8mm 0;
-                font-size: 16pt;
-                font-weight: bold;
-                color: #000;
-              }
-              .info-box {
-                margin-bottom: 8mm;
-                padding: 5mm;
-                border: 1px solid #000;
-                background-color: #f9fafb;
-                font-size: 9pt;
-                page-break-inside: avoid;
-              }
-              .info-box div {
-                display: inline-block;
-                margin-right: 15mm;
-              }
-              table {
-                width: 100%;
-                border-collapse: collapse;
-                margin: 0;
-                font-size: 9pt;
-                table-layout: fixed;
-              }
-              th, td {
-                border: 1px solid #000;
-                padding: 4mm;
-                text-align: left;
-                word-wrap: break-word;
-              }
-              th {
-                background-color: #fbbf24;
-                font-weight: bold;
-                color: #000;
-                font-size: 9pt;
-              }
-              td {
-                font-size: 8pt;
-              }
-              tr:nth-child(even) {
-                background-color: #f9fafb;
-              }
-              .total-row {
-                background-color: #fbbf24 !important;
-                font-weight: bold;
-                font-size: 10pt;
-              }
-              .total-row td {
-                font-size: 10pt;
-              }
-              .footer {
-                margin-top: 8mm;
-                text-align: center;
-                font-size: 8pt;
-                color: #666;
-                page-break-inside: avoid;
-              }
-              @media print {
-                body {
-                  margin: 0;
-                  padding: 0;
-                  width: 210mm;
-                }
-                .container {
-                  width: 100%;
-                  padding: 10mm;
-                }
-                table {
-                  page-break-inside: auto;
-                }
-                tr {
-                  page-break-inside: avoid;
-                  page-break-after: auto;
-                }
-                thead {
-                  display: table-header-group;
-                }
-                tfoot {
-                  display: table-footer-group;
-                }
-              }
-            </style>
-          </head>
-          <body>
-            <div class="container">
-              <h1>SAQIB SILK INDUSTRY - Generated List</h1>
-              <div class="info-box">
-                ${(getCurrentDate() || listTime || twist) ? `<div><strong>Date:</strong> ${getCurrentDate() || ''} | <strong>Time:</strong> ${listTime || ''} | <strong>Twist:</strong> ${twist || ''}</div>` : ''}
-                ${Name ? `<div><strong>Name:</strong> ${Name}</div>` : ''}
-                ${factoryName ? `<div><strong>Factory Name:</strong> ${factoryName}</div>` : ''}
-              </div>
-              <table>
-                <thead>
-                  <tr>
-                    <th style="width: 12%;">Box No</th>
-                    <th style="width: 22%;">G.W</th>
-                    <th style="width: 22%;">N.W</th>
-                    <th style="width: 22%;">Cones</th>
-                    <th style="width: 22%;">LBS</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  ${scannedList.map(item => {
-                    const nw = parseFloat(item.netWeight) || 0
-                    const lbs = (nw * 2.20).toFixed(3)
-                    return `
-                      <tr>
-                        <td>${item.boxNumber}</td>
-                        <td>${item.grossWeight}</td>
-                        <td>${item.netWeight}</td>
-                        <td>${item.cones || item.date || ''}</td>
-                        <td>${lbs}</td>
-                      </tr>
-                    `
-                  }).join('')}
-                  ${scannedList.length > 0 ? `
-                    <tr class="total-row">
-                      <td><strong>TOTAL${scannedList.length}</strong></td>
-                      <td><strong>${totals.totalGW}</strong></td>
-                      <td><strong>${totals.totalNW}</strong></td>
-                      <td><strong>${totals.totalCones}</strong></td>
-                      <td><strong>${totals.totalLbs}</strong></td>
-                    </tr>
-                  ` : ''}
-                </tbody>
-              </table>
-              <div class="footer">
-                Total Entries: ${scannedList.length}
-                ${loaderName ? ` | Loader Name: ${loaderName}` : ''}
-                ${loaderNumber ? ` | Loader Number: ${loaderNumber}` : ''}
-              </div>
-            </div>
-          </body>
-        </html>
-      `)
-      
-      printWindow.document.close()
-      
-      // Wait a moment then print
-      setTimeout(() => {
-        printWindow.print()
-      }, 250)
+
+      // Electron app: silent print via main process (no dialog / no extra window).
+      if (typeof window !== 'undefined' && window.nativeAPI?.printHtml) {
+        const doc = buildGeneratedListPrintDocument(htmlContent)
+        const result = await window.nativeAPI.printHtml(doc, { silent: true })
+        if (!result || !result.success) {
+          console.error('Silent print failed, falling back to popup print:', result)
+          const printWindow = window.open('', '_blank')
+          if (printWindow) {
+            printWindow.document.write(doc)
+            printWindow.document.close()
+          }
+        }
+      } else {
+        const printWindow = window.open('', '_blank')
+        if (printWindow) {
+          printWindow.document.write(buildGeneratedListPrintDocument(htmlContent))
+          printWindow.document.close()
+        }
+      }
       
     } catch (error) {
       console.error('Error generating PDF:', error)
@@ -955,179 +1087,26 @@ const GenerateList = () => {
       })
       setTimeout(() => setNotification({ message: '', type: 'info', show: false }), 5000)
       document.body.removeChild(tempDiv)
-      
-      // Fallback to regular print
-      const printWindow = window.open('', '_blank')
-      printWindow.document.write(`
-        <!DOCTYPE html>
-        <html>
-          <head>
-            <title>Generated List - Saqib Silk Industry</title>
-            <style>
-              @page {
-                size: A4;
-                margin: 15mm;
-              }
-              * {
-                box-sizing: border-box;
-              }
-              body {
-                font-family: Arial, sans-serif;
-                margin: 0;
-                padding: 0;
-                background: white;
-                font-size: 10pt;
-                width: 210mm;
-                min-height: 297mm;
-              }
-              .container {
-                width: 100%;
-                padding: 10mm;
-                page-break-inside: avoid;
-              }
-              h1 {
-                text-align: center;
-                margin: 0 0 8mm 0;
-                font-size: 16pt;
-                font-weight: bold;
-                color: #000;
-              }
-              .info-box {
-                margin-bottom: 8mm;
-                padding: 5mm;
-                border: 1px solid #000;
-                background-color: #f9fafb;
-                font-size: 9pt;
-                page-break-inside: avoid;
-              }
-              .info-box div {
-                display: inline-block;
-                margin-right: 15mm;
-              }
-              table {
-                width: 100%;
-                border-collapse: collapse;
-                margin: 0;
-                font-size: 9pt;
-                table-layout: fixed;
-              }
-              th, td {
-                border: 1px solid #000;
-                padding: 4mm;
-                text-align: left;
-                word-wrap: break-word;
-              }
-              th {
-                background-color: #fbbf24;
-                font-weight: bold;
-                color: #000;
-                font-size: 9pt;
-              }
-              td {
-                font-size: 8pt;
-              }
-              tr:nth-child(even) {
-                background-color: #f9fafb;
-              }
-              .total-row {
-                background-color: #fbbf24 !important;
-                font-weight: bold;
-                font-size: 10pt;
-              }
-              .total-row td {
-                font-size: 10pt;
-              }
-              .footer {
-                margin-top: 8mm;
-                text-align: center;
-                font-size: 8pt;
-                color: #666;
-                page-break-inside: avoid;
-              }
-              @media print {
-                body {
-                  margin: 0;
-                  padding: 0;
-                  width: 210mm;
-                }
-                .container {
-                  width: 100%;
-                  padding: 10mm;
-                }
-                table {
-                  page-break-inside: auto;
-                }
-                tr {
-                  page-break-inside: avoid;
-                  page-break-after: auto;
-                }
-                thead {
-                  display: table-header-group;
-                }
-                tfoot {
-                  display: table-footer-group;
-                }
-              }
-            </style>
-          </head>
-          <body>
-            <div class="container">
-              <h1>SAQIB SILK INDUSTRY - Generated List</h1>
-              <div class="info-box">
-                ${(getCurrentDate() || listTime || twist) ? `<div><strong>Date:</strong> ${getCurrentDate() || ''} | <strong>Time:</strong> ${listTime || ''} | <strong>Twist:</strong> ${twist || ''}</div>` : ''}
-                ${Name ? `<div><strong>Name:</strong> ${Name}</div>` : ''}
-                ${factoryName ? `<div><strong>Factory Name:</strong> ${factoryName}</div>` : ''}
-              </div>
-              <table>
-                <thead>
-                  <tr>
-                    <th style="width: 12%;">Box No</th>
-                    <th style="width: 22%;">G.W</th>
-                    <th style="width: 22%;">N.W</th>
-                    <th style="width: 22%;">Cones</th>
-                    <th style="width: 22%;">LBS</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  ${scannedList.map(item => {
-                    const nw = parseFloat(item.netWeight) || 0
-                    const lbs = (nw * 2.20).toFixed(3)
-                    return `
-                      <tr>
-                        <td>${item.boxNumber}</td>
-                        <td>${item.grossWeight}</td>
-                        <td>${item.netWeight}</td>
-                        <td>${item.cones || item.date || ''}</td>
-                        <td>${lbs}</td>
-                      </tr>
-                    `
-                  }).join('')}
-                  ${scannedList.length > 0 ? `
-                    <tr class="total-row">
-                      <td><strong>TOTAL${scannedList.length}</strong></td>
-                      <td><strong>${totals.totalGW}</strong></td>
-                      <td><strong>${totals.totalNW}</strong></td>
-                      <td><strong>${totals.totalCones}</strong></td>
-                      <td><strong>${totals.totalLbs}</strong></td>
-                    </tr>
-                  ` : ''}
-                </tbody>
-              </table>
-              <div class="footer">
-                Total Entries: ${scannedList.length}
-                ${loaderName ? ` | Loader Name: ${loaderName}` : ''}
-                ${loaderNumber ? ` | Loader Number: ${loaderNumber}` : ''}
-              </div>
-            </div>
-          </body>
-        </html>
-      `)
-      
-      printWindow.document.close()
-      
-      setTimeout(() => {
-        printWindow.print()
-      }, 250)
+
+      const doc = buildGeneratedListPrintDocument(htmlContent)
+
+      if (typeof window !== 'undefined' && window.nativeAPI?.printHtml) {
+        const result = await window.nativeAPI.printHtml(doc, { silent: true })
+        if (!result || !result.success) {
+          console.error('Silent print failed, falling back to popup print:', result)
+          const printWindow = window.open('', '_blank')
+          if (printWindow) {
+            printWindow.document.write(doc)
+            printWindow.document.close()
+          }
+        }
+      } else {
+        const printWindow = window.open('', '_blank')
+        if (printWindow) {
+          printWindow.document.write(doc)
+          printWindow.document.close()
+        }
+      }
     }
   }
 

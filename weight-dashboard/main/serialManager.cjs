@@ -3,13 +3,46 @@ const fs = require('fs')
 const path = require('path')
 const { app } = require('electron')
 
-// Configuration
+// Serial line (weight scale) — match scale / Web Serial defaults
 const BAUD_RATE = 9600
 const DATA_BITS = 8
 const STOP_BITS = 1
 const PARITY = 'none'
+/** Handshaking / hardware flow control: none */
+const RTSCTS = false
 const STABILITY_THRESHOLD = 5 // 5 consecutive identical readings
 const RECONNECT_DELAY = 3000 // 3 seconds
+
+/**
+ * Prefer real USB–serial adapters (FTDI, CH340, etc.) over virtual COM ports
+ * (Intel AMT SOL, Bluetooth) so a single “mystery” scale cable is probed first.
+ * Lower number = scanned first.
+ */
+function portProbePriority(portInfo) {
+  const fn = String(portInfo.friendlyName || '').toLowerCase()
+  const mfr = String(portInfo.manufacturer || '').toLowerCase()
+  const pnp = String(portInfo.pnpId || '').toLowerCase()
+
+  if (mfr.includes('intel') && (fn.includes('management') || fn.includes('amt') || fn.includes('sol'))) {
+    return 200
+  }
+  if (fn.includes('bluetooth') || pnp.includes('bth')) return 180
+  if (portInfo.vendorId) return 10
+  if (mfr.includes('ftdi')) return 12
+  if (mfr.includes('silicon labs') || mfr.includes('silicon laboratories')) return 12
+  if (mfr.includes('wch.cn') || mfr.includes('ch340') || fn.includes('ch340')) return 12
+  if (mfr.includes('prolific')) return 12
+  if (fn.includes('usb serial') || fn.includes('usb-serial')) return 20
+  return 100
+}
+
+function sortPortsForWeightScan(ports) {
+  return [...ports].sort((a, b) => {
+    const d = portProbePriority(a) - portProbePriority(b)
+    if (d !== 0) return d
+    return String(a.path).localeCompare(String(b.path))
+  })
+}
 
 // Detect app root path dynamically
 function getAppRoot() {
@@ -114,6 +147,13 @@ function logToFile(message, level = 'INFO') {
   }
 }
 
+// =XX.YYYY (e.g. 00.0100) → same six-digit reverse family as =000.010 (10 kg)
+function canonTwoByFourToThreeThree(matchStr) {
+  const m = matchStr.match(/^(\d{2})\.(\d{4})$/)
+  if (!m) return matchStr
+  return `${m[1].padStart(3, '0')}.${m[2].slice(0, 3)}`
+}
+
 // Parse weight frame with reversed format (e.g., "=043.000" → 0.340 kg)
 // The device sends weight reversed: 043.000 means 0.340 kg
 function parseWeightFrameReversed(frame) {
@@ -207,6 +247,32 @@ function parseWeightFrame(frame) {
   return parseFloat(kg.toFixed(3))
 }
 
+/**
+ * Parse kg from /=([0-9]{2,3}\.[0-9]{2,4})/ capture (continuous stream).
+ * YH-T7E-style: =64.1000 → canon "064.100" → six-digit reverse → 1.460 kg (not plain 64.1).
+ * =00.0100 → "000.010" → reversed → 10 kg. Do not use parseFloat on the raw 2+4 token.
+ */
+function kgFromFlexWeightMatch(lastMatch) {
+  if (!lastMatch || typeof lastMatch !== 'string') return null
+
+  const matchForParse = /^\d{2}\.\d{4}$/.test(lastMatch)
+    ? canonTwoByFourToThreeThree(lastMatch)
+    : lastMatch
+  const token = `=${matchForParse}`
+  let weight = null
+  if (/^\d{3}\.\d{3}$/.test(matchForParse)) {
+    weight = parseWeightFrameReversed(token)
+  } else if (/^\d{2}\.\d{3}$/.test(matchForParse)) {
+    weight = parseFloat(matchForParse)
+  } else {
+    weight = parseWeightFrame(token)
+  }
+  if (weight !== null && !isNaN(weight) && isFinite(weight)) {
+    return weight
+  }
+  return null
+}
+
 // Detect stable weight (5 consecutive identical readings)
 function detectStableWeight(weight) {
   readingsBuffer.push(weight)
@@ -264,21 +330,18 @@ function setupWeightPortHandlerRaw() {
     // Convert buffer to string and look for weight pattern
     const dataString = rawDataBuffer.toString('ascii')
     
-    // Look for pattern =DDD.DDD in the continuous stream
-    // Pattern: = followed by 3 digits, dot, 3 digits
-    const weightPattern = /=([0-9]{3}\.[0-9]{3})/g
+    // 2–3 digits before dot, 2–4 after (4th captures e.g. 00.0100 → 10 kg after canon + reverse)
+    const weightPattern = /=([0-9]{2,3}\.[0-9]{2,4})/g
     let match
     let lastMatch = null
     
-    // Find all matches in the buffer (get the latest one)
     while ((match = weightPattern.exec(dataString)) !== null) {
-      lastMatch = match[1] // Extract the weight part (e.g., "043.000")
+      lastMatch = match[1]
     }
     
     if (lastMatch) {
-      // Parse the weight (reversed: 043.000 → 0.340)
-      const weight = parseWeightFrameReversed(`=${lastMatch}`)
-      
+      const weight = kgFromFlexWeightMatch(lastMatch)
+
       if (weight !== null && !isNaN(weight) && isFinite(weight)) {
         // Emit live weight reading
         if (mainWindow) {
@@ -384,14 +447,18 @@ function scheduleReconnect() {
 async function testPort(portPath) {
   let testPort = null
   try {
-    logToFile(`Testing port ${portPath} @ ${BAUD_RATE} baud (${DATA_BITS} data bits, ${PARITY} parity, ${STOP_BITS} stop bits)`, 'INFO')
-    
+    logToFile(
+      `Testing port ${portPath} @ ${BAUD_RATE} baud, ${DATA_BITS}${PARITY === 'none' ? 'N' : PARITY[0].toUpperCase()}${STOP_BITS}, handshaking none (rtscts=${RTSCTS})`,
+      'INFO'
+    )
+
     testPort = new SerialPort({
       path: portPath,
       baudRate: BAUD_RATE,
       dataBits: DATA_BITS,
       parity: PARITY,
-      stopBits: STOP_BITS
+      stopBits: STOP_BITS,
+      rtscts: RTSCTS,
     })
 
     // Wait for port to open
@@ -415,8 +482,7 @@ async function testPort(portPath) {
       }, 500)
     })
 
-    // Device sends continuous stream without delimiters (e.g., =043.000=043.000=043.000...)
-    // Parse raw data directly looking for =DDD.DDD pattern
+    // Device sends continuous stream without delimiters (e.g. =24.1000=24.1000… or =043.000…)
     logToFile(`Waiting for weight data from ${portPath} (timeout: 5 seconds)...`, 'INFO')
     logToFile(`Parsing continuous stream (no delimiters)`, 'INFO')
 
@@ -434,7 +500,7 @@ async function testPort(portPath) {
         } else if (!validWeightFound) {
           logToFile(`Data received from ${portPath} but no valid weight frames found`, 'WARN')
           logToFile(`💡 The device is sending data but in a different format than expected`, 'INFO')
-          logToFile(`💡 Expected format: =DDD.DDD (e.g., =043.000)`, 'INFO')
+          logToFile(`💡 Expected: =weight with 2–3 digits and 2–4 decimals (e.g. =24.1000 or =043.000)`, 'INFO')
           reject(new Error('No valid weight frames'))
         }
       }, 5000)
@@ -457,28 +523,22 @@ async function testPort(portPath) {
           logToFile(`Raw data sample (hex): ${hex}`, 'INFO')
         }
         
-        // Convert buffer to string and look for weight pattern
+        // Same flex pattern as live stream: =24.1000, =043.000, =00.0100, etc.
         const dataString = rawDataBuffer.toString('ascii')
-        
-        // Look for pattern =DDD.DDD in the continuous stream
-        // Pattern: = followed by 3 digits, dot, 3 digits
-        const weightPattern = /=([0-9]{3}\.[0-9]{3})/g
+        const weightPattern = /=([0-9]{2,3}\.[0-9]{2,4})/g
         let match
         let lastMatch = null
-        
-        // Find all matches in the buffer
         while ((match = weightPattern.exec(dataString)) !== null) {
-          lastMatch = match[1] // Extract the weight part (e.g., "043.000")
+          lastMatch = match[1]
         }
-        
+
         if (lastMatch) {
-          // Parse the weight (reversed: 043.000 → 0.340)
-          const weight = parseWeightFrameReversed(`=${lastMatch}`)
+          const weight = kgFromFlexWeightMatch(lastMatch)
           if (weight !== null) {
             clearTimeout(timeout)
             validWeightFound = true
-            logToFile(`✅ Port ${portPath} is sending valid weight data: ${weight} kg (from ${lastMatch})`, 'INFO')
-            testPort.removeAllListeners('data') // Stop listening
+            logToFile(`✅ Port ${portPath} is sending valid weight data: ${weight} kg (from =${lastMatch})`, 'INFO')
+            testPort.removeAllListeners('data')
             resolve(weight)
           }
         }
@@ -514,11 +574,17 @@ async function testPort(portPath) {
   }
 }
 
-// Send connection status to renderer
+// Send connection status to renderer (include baud / frame so UI is not blank or misleading)
 function sendConnectionStatus(status, portPath = null) {
-  if (mainWindow) {
-    mainWindow.webContents.send('serial-status', { status, port: portPath })
+  if (!mainWindow) return
+  const payload = { status, port: portPath }
+  if (status === 'connecting' || status === 'connected') {
+    payload.baud = BAUD_RATE
+    const p =
+      PARITY === 'none' ? 'N' : PARITY === 'even' ? 'E' : PARITY === 'odd' ? 'O' : 'N'
+    payload.lineCoding = `${DATA_BITS}${p}${STOP_BITS}`
   }
+  mainWindow.webContents.send('serial-status', payload)
 }
 
 // Connect to a specific port
@@ -531,7 +597,10 @@ async function connectToPort(portPath) {
       return true
     }
     
-    logToFile(`🔗 Connecting to ${portPath} @ ${BAUD_RATE} baud (${DATA_BITS} data bits, ${PARITY} parity, ${STOP_BITS} stop bits)`, 'INFO')
+    logToFile(
+      `🔗 Connecting to ${portPath} @ ${BAUD_RATE} baud, ${DATA_BITS}${PARITY === 'none' ? 'N' : PARITY[0].toUpperCase()}${STOP_BITS}, handshaking none`,
+      'INFO'
+    )
     sendConnectionStatus('connecting', portPath)
 
     // Close existing connection if different port
@@ -553,7 +622,8 @@ async function connectToPort(portPath) {
       baudRate: BAUD_RATE,
       dataBits: DATA_BITS,
       parity: PARITY,
-      stopBits: STOP_BITS
+      stopBits: STOP_BITS,
+      rtscts: RTSCTS,
     })
 
     // Wait for port to open
@@ -647,17 +717,18 @@ async function scanAndConnect() {
     logToFile('🔍 Starting scan for available COM ports...', 'INFO')
     sendConnectionStatus('connecting')
     const ports = await SerialPort.list()
-    logToFile(`📋 Found ${ports.length} COM port(s) available`, 'INFO')
+    const sortedPorts = sortPortsForWeightScan(ports)
+    logToFile(`📋 Found ${sortedPorts.length} COM port(s) available (USB scale candidates first, AMT/Bluetooth last)`, 'INFO')
     
-    if (ports.length === 0) {
+    if (sortedPorts.length === 0) {
       logToFile('⚠️ No COM ports found on system', 'WARN')
       sendConnectionStatus('disconnected')
       scheduleReconnect()
       return
     }
     
-    // List all ports found
-    ports.forEach((portInfo, index) => {
+    // List all ports found (order is probe order)
+    sortedPorts.forEach((portInfo, index) => {
       logToFile(`  ${index + 1}. ${portInfo.path} - ${portInfo.manufacturer || 'Unknown'} ${portInfo.vendorId ? `(VID: ${portInfo.vendorId})` : ''}`, 'INFO')
     })
 
@@ -665,12 +736,12 @@ async function scanAndConnect() {
     const accessDeniedPorts = []
     const otherPorts = []
 
-    // Try each port
-    for (let i = 0; i < ports.length; i++) {
-      const portInfo = ports[i]
+    // Try each port (sorted: weight-scale USB adapters before Intel SOL / Bluetooth)
+    for (let i = 0; i < sortedPorts.length; i++) {
+      const portInfo = sortedPorts[i]
       const portPath = portInfo.path
       
-      logToFile(`\n🔌 Testing port ${i + 1}/${ports.length}: ${portPath}`, 'INFO')
+      logToFile(`\n🔌 Testing port ${i + 1}/${sortedPorts.length}: ${portPath}`, 'INFO')
 
       try {
         // Check if this port is already connected and working
@@ -755,7 +826,7 @@ async function scanAndConnect() {
     }
 
     // No valid port found
-    logToFile(`\n❌ No valid weight device found after testing all ${ports.length} port(s)`, 'WARN')
+    logToFile(`\n❌ No valid weight device found after testing all ${sortedPorts.length} port(s)`, 'WARN')
     logToFile('💡 Make sure the weight machine is: 1) Plugged in, 2) Powered on, 3) Sending data', 'INFO')
     logToFile('💡 If a port shows "Access denied", close any other apps using that port and click "Reconnect"', 'INFO')
     sendConnectionStatus('disconnected')

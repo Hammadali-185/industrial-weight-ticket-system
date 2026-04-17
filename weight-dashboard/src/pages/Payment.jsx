@@ -364,7 +364,7 @@ const Payment = () => {
                       // Use saved totalLbs from storage
                       totalLBS = parseFloat(latestList.totals.totalLbs)
                     } else {
-                      // Calculate from all unique boxes (netWeight * 2.20462)
+                      // Calculate from all unique boxes (netWeight * 2.2046)
                       const allBoxes = personBoxes.flatMap(list => list.scannedList)
                       const seenBoxes = new Set()
                       const uniqueBoxes = []
@@ -379,7 +379,7 @@ const Payment = () => {
                       
                       totalLBS = uniqueBoxes.reduce((sum, box) => {
                         const nw = parseFloat(box.netWeight) || 0
-                        return sum + (nw * 2.20462)
+                        return sum + (nw * 2.2046)
                       }, 0)
                     }
                     
